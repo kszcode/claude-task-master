@@ -28,19 +28,21 @@ import { fixDependenciesDirect } from './direct-functions/fix-dependencies.js';
 import { complexityReportDirect } from './direct-functions/complexity-report.js';
 import { addDependencyDirect } from './direct-functions/add-dependency.js';
 import { removeTaskDirect } from './direct-functions/remove-task.js';
-import { initializeProjectDirect } from './direct-functions/initialize-project-direct.js';
+import { initializeProjectDirect } from './direct-functions/initialize-project.js';
+import { modelsDirect } from './direct-functions/models.js';
+import { moveTaskDirect } from './direct-functions/move-task.js';
+import { researchDirect } from './direct-functions/research.js';
+import { addTagDirect } from './direct-functions/add-tag.js';
+import { deleteTagDirect } from './direct-functions/delete-tag.js';
+import { listTagsDirect } from './direct-functions/list-tags.js';
+import { useTagDirect } from './direct-functions/use-tag.js';
+import { renameTagDirect } from './direct-functions/rename-tag.js';
+import { copyTagDirect } from './direct-functions/copy-tag.js';
+import { scopeUpDirect } from './direct-functions/scope-up.js';
+import { scopeDownDirect } from './direct-functions/scope-down.js';
 
 // Re-export utility functions
-export { findTasksJsonPath } from './utils/path-utils.js';
-
-// Re-export AI client utilities
-export {
-	getAnthropicClientForMCP,
-	getPerplexityClientForMCP,
-	getModelConfig,
-	getBestAvailableAIModel,
-	handleClaudeError
-} from './utils/ai-client-utils.js';
+export { findTasksPath } from './utils/path-utils.js';
 
 // Use Map for potential future enhancements like introspection or dynamic dispatch
 export const directFunctions = new Map([
@@ -66,7 +68,19 @@ export const directFunctions = new Map([
 	['fixDependenciesDirect', fixDependenciesDirect],
 	['complexityReportDirect', complexityReportDirect],
 	['addDependencyDirect', addDependencyDirect],
-	['removeTaskDirect', removeTaskDirect]
+	['removeTaskDirect', removeTaskDirect],
+	['initializeProjectDirect', initializeProjectDirect],
+	['modelsDirect', modelsDirect],
+	['moveTaskDirect', moveTaskDirect],
+	['researchDirect', researchDirect],
+	['addTagDirect', addTagDirect],
+	['deleteTagDirect', deleteTagDirect],
+	['listTagsDirect', listTagsDirect],
+	['useTagDirect', useTagDirect],
+	['renameTagDirect', renameTagDirect],
+	['copyTagDirect', copyTagDirect],
+	['scopeUpDirect', scopeUpDirect],
+	['scopeDownDirect', scopeDownDirect]
 ]);
 
 // Re-export all direct function implementations
@@ -94,5 +108,16 @@ export {
 	complexityReportDirect,
 	addDependencyDirect,
 	removeTaskDirect,
-	initializeProjectDirect
+	initializeProjectDirect,
+	modelsDirect,
+	moveTaskDirect,
+	researchDirect,
+	addTagDirect,
+	deleteTagDirect,
+	listTagsDirect,
+	useTagDirect,
+	renameTagDirect,
+	copyTagDirect,
+	scopeUpDirect,
+	scopeDownDirect
 };

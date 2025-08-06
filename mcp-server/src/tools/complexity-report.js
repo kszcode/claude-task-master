@@ -7,10 +7,12 @@ import { z } from 'zod';
 import {
 	handleApiResult,
 	createErrorResponse,
-	getProjectRootFromSession
+	withNormalizedProjectRoot
 } from './utils.js';
 import { complexityReportDirect } from '../core/task-master-core.js';
-import path from 'path';
+import { COMPLEXITY_REPORT_FILE } from '../../../src/constants/paths.js';
+import { findComplexityReportPath } from '../core/utils/path-utils.js';
+import { getCurrentTag } from '../../../scripts/modules/utils.js';
 
 /**
  * Register the complexityReport tool with the MCP server
@@ -25,48 +27,44 @@ export function registerComplexityReportTool(server) {
 				.string()
 				.optional()
 				.describe(
-					'Path to the report file (default: scripts/task-complexity-report.json)'
+					`Path to the report file (default: ${COMPLEXITY_REPORT_FILE})`
 				),
 			projectRoot: z
 				.string()
 				.describe('The directory of the project. Must be an absolute path.')
 		}),
-		execute: async (args, { log, session }) => {
+		execute: withNormalizedProjectRoot(async (args, { log, session }) => {
 			try {
 				log.info(
 					`Getting complexity report with args: ${JSON.stringify(args)}`
 				);
 
-				// Get project root from args or session
-				const rootFolder =
-					args.projectRoot || getProjectRootFromSession(session, log);
+				const resolvedTag = getCurrentTag(args.projectRoot);
 
-				// Ensure project root was determined
-				if (!rootFolder) {
+				const pathArgs = {
+					projectRoot: args.projectRoot,
+					complexityReport: args.file,
+					tag: resolvedTag
+				};
+
+				const reportPath = findComplexityReportPath(pathArgs, log);
+				log.info('Reading complexity report from path: ', reportPath);
+
+				if (!reportPath) {
 					return createErrorResponse(
-						'Could not determine project root. Please provide it explicitly or ensure your session contains valid root information.'
+						'No complexity report found. Run task-master analyze-complexity first.'
 					);
 				}
 
-				// Resolve the path to the complexity report file
-				// Default to scripts/task-complexity-report.json relative to root
-				const reportPath = args.file
-					? path.resolve(rootFolder, args.file)
-					: path.resolve(rootFolder, 'scripts', 'task-complexity-report.json');
-
 				const result = await complexityReportDirect(
 					{
-						// Pass the explicitly resolved path
 						reportPath: reportPath
-						// No other args specific to this tool
 					},
 					log
 				);
 
 				if (result.success) {
-					log.info(
-						`Successfully retrieved complexity report${result.fromCache ? ' (from cache)' : ''}`
-					);
+					log.info('Successfully retrieved complexity report');
 				} else {
 					log.error(
 						`Failed to retrieve complexity report: ${result.error.message}`
@@ -76,7 +74,9 @@ export function registerComplexityReportTool(server) {
 				return handleApiResult(
 					result,
 					log,
-					'Error retrieving complexity report'
+					'Error retrieving complexity report',
+					undefined,
+					args.projectRoot
 				);
 			} catch (error) {
 				log.error(`Error in complexity-report tool: ${error.message}`);
@@ -84,6 +84,6 @@ export function registerComplexityReportTool(server) {
 					`Failed to retrieve complexity report: ${error.message}`
 				);
 			}
-		}
+		})
 	});
 }

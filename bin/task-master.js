@@ -1,4 +1,4 @@
-#!/usr/bin/env node --trace-deprecation
+#!/usr/bin/env node
 
 /**
  * Task Master
@@ -373,8 +373,4 @@ if (process.argv.length <= 2) {
 }
 
 // Add exports at the end of the file
-if (typeof module !== 'undefined') {
-	module.exports = {
-		detectCamelCaseFlags
-	};
-}
+export { detectCamelCaseFlags };

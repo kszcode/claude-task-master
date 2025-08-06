@@ -46,22 +46,18 @@ export const initProject = async (options = {}) => {
 };
 
 // Export a function to run init as a CLI command
-export const runInitCLI = async () => {
-	// Using spawn to ensure proper handling of stdio and process exit
-	const child = spawn('node', [resolve(__dirname, './scripts/init.js')], {
-		stdio: 'inherit',
-		cwd: process.cwd()
-	});
-
-	return new Promise((resolve, reject) => {
-		child.on('close', (code) => {
-			if (code === 0) {
-				resolve();
-			} else {
-				reject(new Error(`Init script exited with code ${code}`));
-			}
-		});
-	});
+export const runInitCLI = async (options = {}) => {
+	try {
+		const init = await import('./scripts/init.js');
+		const result = await init.initializeProject(options);
+		return result;
+	} catch (error) {
+		console.error('Initialization failed:', error.message);
+		if (process.env.DEBUG === 'true') {
+			console.error('Debug stack trace:', error.stack);
+		}
+		throw error; // Re-throw to be handled by the command handler
+	}
 };
 
 // Export version information
@@ -79,11 +75,26 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 	program
 		.command('init')
 		.description('Initialize a new project')
-		.action(() => {
-			runInitCLI().catch((err) => {
+		.option('-y, --yes', 'Skip prompts and use default values')
+		.option('-n, --name <n>', 'Project name')
+		.option('-d, --description <description>', 'Project description')
+		.option('-v, --version <version>', 'Project version', '0.1.0')
+		.option('-a, --author <author>', 'Author name')
+		.option('--skip-install', 'Skip installing dependencies')
+		.option('--dry-run', 'Show what would be done without making changes')
+		.option('--aliases', 'Add shell aliases (tm, taskmaster)')
+		.option('--no-aliases', 'Skip shell aliases (tm, taskmaster)')
+		.option('--git', 'Initialize Git repository')
+		.option('--no-git', 'Skip Git repository initialization')
+		.option('--git-tasks', 'Store tasks in Git')
+		.option('--no-git-tasks', 'No Git storage of tasks')
+		.action(async (cmdOptions) => {
+			try {
+				await runInitCLI(cmdOptions);
+			} catch (err) {
 				console.error('Init failed:', err.message);
 				process.exit(1);
-			});
+			}
 		});
 
 	program

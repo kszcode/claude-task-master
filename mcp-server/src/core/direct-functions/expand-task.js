@@ -3,7 +3,7 @@
  * Direct function implementation for expanding a task into subtasks
  */
 
-import { expandTask } from '../../../../scripts/modules/task-manager.js';
+import expandTask from '../../../../scripts/modules/task-manager/expand-task.js';
 import {
 	readJSON,
 	writeJSON,
@@ -11,12 +11,9 @@ import {
 	disableSilentMode,
 	isSilentMode
 } from '../../../../scripts/modules/utils.js';
-import {
-	getAnthropicClientForMCP,
-	getModelConfig
-} from '../utils/ai-client-utils.js';
 import path from 'path';
 import fs from 'fs';
+import { createLogWrapper } from '../../tools/utils.js';
 
 /**
  * Direct function wrapper for expanding a task into subtasks with error handling.
@@ -25,17 +22,30 @@ import fs from 'fs';
  * @param {string} args.tasksJsonPath - Explicit path to the tasks.json file.
  * @param {string} args.id - The ID of the task to expand.
  * @param {number|string} [args.num] - Number of subtasks to generate.
- * @param {boolean} [args.research] - Enable Perplexity AI for research-backed subtask generation.
+ * @param {boolean} [args.research] - Enable research role for subtask generation.
  * @param {string} [args.prompt] - Additional context to guide subtask generation.
  * @param {boolean} [args.force] - Force expansion even if subtasks exist.
+ * @param {string} [args.projectRoot] - Project root directory.
+ * @param {string} [args.tag] - Tag for the task
  * @param {Object} log - Logger object
- * @param {Object} context - Context object containing session and reportProgress
- * @returns {Promise<Object>} - Task expansion result { success: boolean, data?: any, error?: { code: string, message: string }, fromCache: boolean }
+ * @param {Object} context - Context object containing session
+ * @param {Object} [context.session] - MCP Session object
+ * @returns {Promise<Object>} - Task expansion result { success: boolean, data?: any, error?: { code: string, message: string } }
  */
 export async function expandTaskDirect(args, log, context = {}) {
-	const { session } = context;
-	// Destructure expected args
-	const { tasksJsonPath, id, num, research, prompt, force } = args;
+	const { session } = context; // Extract session
+	// Destructure expected args, including projectRoot
+	const {
+		tasksJsonPath,
+		id,
+		num,
+		research,
+		prompt,
+		force,
+		projectRoot,
+		tag,
+		complexityReportPath
+	} = args;
 
 	// Log session root data for debugging
 	log.info(
@@ -55,8 +65,7 @@ export async function expandTaskDirect(args, log, context = {}) {
 			error: {
 				code: 'MISSING_ARGUMENT',
 				message: 'tasksJsonPath is required'
-			},
-			fromCache: false
+			}
 		};
 	}
 
@@ -74,8 +83,7 @@ export async function expandTaskDirect(args, log, context = {}) {
 			error: {
 				code: 'INPUT_VALIDATION_ERROR',
 				message: 'Task ID is required'
-			},
-			fromCache: false
+			}
 		};
 	}
 
@@ -85,33 +93,14 @@ export async function expandTaskDirect(args, log, context = {}) {
 	const additionalContext = prompt || '';
 	const forceFlag = force === true;
 
-	// Initialize AI client if needed (for expandTask function)
-	try {
-		// This ensures the AI client is available by checking it
-		if (useResearch) {
-			log.info('Verifying AI client for research-backed expansion');
-			await getAnthropicClientForMCP(session, log);
-		}
-	} catch (error) {
-		log.error(`Failed to initialize AI client: ${error.message}`);
-		return {
-			success: false,
-			error: {
-				code: 'AI_CLIENT_ERROR',
-				message: `Cannot initialize AI client: ${error.message}`
-			},
-			fromCache: false
-		};
-	}
-
 	try {
 		log.info(
-			`[expandTaskDirect] Expanding task ${taskId} into ${numSubtasks || 'default'} subtasks. Research: ${useResearch}`
+			`[expandTaskDirect] Expanding task ${taskId} into ${numSubtasks || 'default'} subtasks. Research: ${useResearch}, Force: ${forceFlag}`
 		);
 
 		// Read tasks data
 		log.info(`[expandTaskDirect] Attempting to read JSON from: ${tasksPath}`);
-		const data = readJSON(tasksPath);
+		const data = readJSON(tasksPath, projectRoot);
 		log.info(
 			`[expandTaskDirect] Result of readJSON: ${data ? 'Data read successfully' : 'readJSON returned null or undefined'}`
 		);
@@ -125,8 +114,7 @@ export async function expandTaskDirect(args, log, context = {}) {
 				error: {
 					code: 'INVALID_TASKS_FILE',
 					message: `No valid tasks found in ${tasksPath}. readJSON returned: ${JSON.stringify(data)}`
-				},
-				fromCache: false
+				}
 			};
 		}
 
@@ -141,8 +129,7 @@ export async function expandTaskDirect(args, log, context = {}) {
 				error: {
 					code: 'TASK_NOT_FOUND',
 					message: `Task with ID ${taskId} not found`
-				},
-				fromCache: false
+				}
 			};
 		}
 
@@ -153,8 +140,7 @@ export async function expandTaskDirect(args, log, context = {}) {
 				error: {
 					code: 'TASK_COMPLETED',
 					message: `Task ${taskId} is already marked as ${task.status} and cannot be expanded`
-				},
-				fromCache: false
+				}
 			};
 		}
 
@@ -171,8 +157,7 @@ export async function expandTaskDirect(args, log, context = {}) {
 					task,
 					subtasksAdded: 0,
 					hasExistingSubtasks
-				},
-				fromCache: false
+				}
 			};
 		}
 
@@ -190,38 +175,48 @@ export async function expandTaskDirect(args, log, context = {}) {
 		// Tracking subtasks count before expansion
 		const subtasksCountBefore = task.subtasks ? task.subtasks.length : 0;
 
-		// Create a backup of the tasks.json file
-		const backupPath = path.join(path.dirname(tasksPath), 'tasks.json.bak');
-		fs.copyFileSync(tasksPath, backupPath);
-
 		// Directly modify the data instead of calling the CLI function
 		if (!task.subtasks) {
 			task.subtasks = [];
 		}
 
-		// Save tasks.json with potentially empty subtasks array
-		writeJSON(tasksPath, data);
+		// Save tasks.json with potentially empty subtasks array and proper context
+		writeJSON(tasksPath, data, projectRoot, tag);
 
+		// Create logger wrapper using the utility
+		const mcpLog = createLogWrapper(log);
+
+		let wasSilent; // Declare wasSilent outside the try block
 		// Process the request
 		try {
 			// Enable silent mode to prevent console logs from interfering with JSON response
-			enableSilentMode();
+			wasSilent = isSilentMode(); // Assign inside the try block
+			if (!wasSilent) enableSilentMode();
 
-			// Call expandTask with session context to ensure AI client is properly initialized
-			const result = await expandTask(
+			// Call the core expandTask function with the wrapped logger and projectRoot
+			const coreResult = await expandTask(
 				tasksPath,
 				taskId,
 				numSubtasks,
 				useResearch,
 				additionalContext,
-				{ mcpLog: log, session } // Only pass mcpLog and session, NOT reportProgress
+				{
+					complexityReportPath,
+					mcpLog,
+					session,
+					projectRoot,
+					commandName: 'expand-task',
+					outputType: 'mcp',
+					tag
+				},
+				forceFlag
 			);
 
 			// Restore normal logging
-			disableSilentMode();
+			if (!wasSilent && isSilentMode()) disableSilentMode();
 
 			// Read the updated data
-			const updatedData = readJSON(tasksPath);
+			const updatedData = readJSON(tasksPath, projectRoot);
 			const updatedTask = updatedData.tasks.find((t) => t.id === taskId);
 
 			// Calculate how many subtasks were added
@@ -229,22 +224,23 @@ export async function expandTaskDirect(args, log, context = {}) {
 				? updatedTask.subtasks.length - subtasksCountBefore
 				: 0;
 
-			// Return the result
+			// Return the result, including telemetryData
 			log.info(
 				`Successfully expanded task ${taskId} with ${subtasksAdded} new subtasks`
 			);
 			return {
 				success: true,
 				data: {
-					task: updatedTask,
+					task: coreResult.task,
 					subtasksAdded,
-					hasExistingSubtasks
-				},
-				fromCache: false
+					hasExistingSubtasks,
+					telemetryData: coreResult.telemetryData,
+					tagInfo: coreResult.tagInfo
+				}
 			};
 		} catch (error) {
 			// Make sure to restore normal logging even if there's an error
-			disableSilentMode();
+			if (!wasSilent && isSilentMode()) disableSilentMode();
 
 			log.error(`Error expanding task: ${error.message}`);
 			return {
@@ -252,8 +248,7 @@ export async function expandTaskDirect(args, log, context = {}) {
 				error: {
 					code: 'CORE_FUNCTION_ERROR',
 					message: error.message || 'Failed to expand task'
-				},
-				fromCache: false
+				}
 			};
 		}
 	} catch (error) {
@@ -263,8 +258,7 @@ export async function expandTaskDirect(args, log, context = {}) {
 			error: {
 				code: 'CORE_FUNCTION_ERROR',
 				message: error.message || 'Failed to expand task'
-			},
-			fromCache: false
+			}
 		};
 	}
 }

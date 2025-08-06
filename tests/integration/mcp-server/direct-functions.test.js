@@ -3,9 +3,8 @@
  */
 
 import { jest } from '@jest/globals';
-import path from 'path';
+import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { dirname } from 'path';
 
 // Get the current module's directory
 const __filename = fileURLToPath(import.meta.url);
@@ -27,6 +26,7 @@ const mockReadJSON = jest.fn();
 const mockWriteJSON = jest.fn();
 const mockEnableSilentMode = jest.fn();
 const mockDisableSilentMode = jest.fn();
+const mockReadComplexityReport = jest.fn().mockReturnValue(null);
 
 const mockGetAnthropicClient = jest.fn().mockReturnValue({});
 const mockGetConfiguredAnthropicClient = jest.fn().mockReturnValue({});
@@ -130,9 +130,10 @@ jest.mock('../../../scripts/modules/utils.js', () => ({
 	writeJSON: mockWriteJSON,
 	enableSilentMode: mockEnableSilentMode,
 	disableSilentMode: mockDisableSilentMode,
+	readComplexityReport: mockReadComplexityReport,
 	CONFIG: {
 		model: 'claude-3-7-sonnet-20250219',
-		maxTokens: 64000,
+		maxTokens: 8192,
 		temperature: 0.2,
 		defaultSubtasks: 5
 	}
@@ -144,11 +145,11 @@ jest.mock('../../../mcp-server/src/core/utils/path-utils.js', () => ({
 }));
 
 // Mock the AI module to prevent any real API calls
-jest.mock('../../../scripts/modules/ai-services.js', () => ({
-	getAnthropicClient: mockGetAnthropicClient,
-	getConfiguredAnthropicClient: mockGetConfiguredAnthropicClient,
-	_handleAnthropicStream: mockHandleAnthropicStream,
-	parseSubtasksFromText: mockParseSubtasksFromText
+jest.mock('../../../scripts/modules/ai-services-unified.js', () => ({
+	// Mock the functions exported by ai-services-unified.js as needed
+	// For example, if you are testing a function that uses generateTextService:
+	generateTextService: jest.fn().mockResolvedValue('Mock AI Response')
+	// Add other mocks for generateObjectService, streamTextService if used
 }));
 
 // Mock task-manager.js to avoid real operations
@@ -160,15 +161,6 @@ jest.mock('../../../scripts/modules/task-manager.js', () => ({
 }));
 
 // Import dependencies after mocks are set up
-import fs from 'fs';
-import {
-	readJSON,
-	writeJSON,
-	enableSilentMode,
-	disableSilentMode
-} from '../../../scripts/modules/utils.js';
-import { expandTask } from '../../../scripts/modules/task-manager.js';
-import { findTasksJsonPath } from '../../../mcp-server/src/core/utils/path-utils.js';
 import { sampleTasks } from '../../fixtures/sample-tasks.js';
 
 // Mock logger
@@ -220,6 +212,37 @@ describe('MCP Server Direct Functions', () => {
 	});
 
 	describe('listTasksDirect', () => {
+		// Sample complexity report for testing
+		const mockComplexityReport = {
+			meta: {
+				generatedAt: '2025-03-24T20:01:35.986Z',
+				tasksAnalyzed: 3,
+				thresholdScore: 5,
+				projectName: 'Test Project',
+				usedResearch: false
+			},
+			complexityAnalysis: [
+				{
+					taskId: 1,
+					taskTitle: 'Initialize Project',
+					complexityScore: 3,
+					recommendedSubtasks: 2
+				},
+				{
+					taskId: 2,
+					taskTitle: 'Create Core Functionality',
+					complexityScore: 8,
+					recommendedSubtasks: 5
+				},
+				{
+					taskId: 3,
+					taskTitle: 'Implement UI Components',
+					complexityScore: 6,
+					recommendedSubtasks: 4
+				}
+			]
+		};
+
 		// Test wrapper function that doesn't rely on the actual implementation
 		async function testListTasks(args, mockLogger) {
 			// File not found case
@@ -230,9 +253,25 @@ describe('MCP Server Direct Functions', () => {
 					error: {
 						code: 'FILE_NOT_FOUND_ERROR',
 						message: 'Tasks file not found'
-					},
-					fromCache: false
+					}
 				};
+			}
+
+			// Check for complexity report
+			const complexityReport = mockReadComplexityReport();
+			let tasksData = [...sampleTasks.tasks];
+
+			// Add complexity scores if report exists
+			if (complexityReport && complexityReport.complexityAnalysis) {
+				tasksData = tasksData.map((task) => {
+					const analysis = complexityReport.complexityAnalysis.find(
+						(a) => a.taskId === task.id
+					);
+					if (analysis) {
+						return { ...task, complexityScore: analysis.complexityScore };
+					}
+					return task;
+				});
 			}
 
 			// Success case
@@ -240,38 +279,31 @@ describe('MCP Server Direct Functions', () => {
 				return {
 					success: true,
 					data: {
-						tasks: sampleTasks.tasks,
+						tasks: tasksData,
 						stats: {
-							total: sampleTasks.tasks.length,
-							completed: sampleTasks.tasks.filter((t) => t.status === 'done')
+							total: tasksData.length,
+							completed: tasksData.filter((t) => t.status === 'done').length,
+							inProgress: tasksData.filter((t) => t.status === 'in-progress')
 								.length,
-							inProgress: sampleTasks.tasks.filter(
-								(t) => t.status === 'in-progress'
-							).length,
-							pending: sampleTasks.tasks.filter((t) => t.status === 'pending')
-								.length
+							pending: tasksData.filter((t) => t.status === 'pending').length
 						}
-					},
-					fromCache: false
+					}
 				};
 			}
 
 			// Status filter case
 			if (args.status) {
-				const filteredTasks = sampleTasks.tasks.filter(
-					(t) => t.status === args.status
-				);
+				const filteredTasks = tasksData.filter((t) => t.status === args.status);
 				return {
 					success: true,
 					data: {
 						tasks: filteredTasks,
 						filter: args.status,
 						stats: {
-							total: sampleTasks.tasks.length,
+							total: tasksData.length,
 							filtered: filteredTasks.length
 						}
-					},
-					fromCache: false
+					}
 				};
 			}
 
@@ -280,13 +312,12 @@ describe('MCP Server Direct Functions', () => {
 				return {
 					success: true,
 					data: {
-						tasks: sampleTasks.tasks,
+						tasks: tasksData,
 						includeSubtasks: true,
 						stats: {
-							total: sampleTasks.tasks.length
+							total: tasksData.length
 						}
-					},
-					fromCache: false
+					}
 				};
 			}
 
@@ -370,6 +401,29 @@ describe('MCP Server Direct Functions', () => {
 			expect(result.error.code).toBe('FILE_NOT_FOUND_ERROR');
 			expect(mockLogger.error).toHaveBeenCalled();
 		});
+
+		test('should include complexity scores when complexity report exists', async () => {
+			// Arrange
+			mockReadComplexityReport.mockReturnValueOnce(mockComplexityReport);
+			const args = {
+				projectRoot: testProjectRoot,
+				file: testTasksPath,
+				withSubtasks: true
+			};
+
+			// Act
+			const result = await testListTasks(args, mockLogger);
+			// Assert
+			expect(result.success).toBe(true);
+
+			// Check that tasks have complexity scores from the report
+			mockComplexityReport.complexityAnalysis.forEach((analysis) => {
+				const task = result.data.tasks.find((t) => t.id === analysis.taskId);
+				if (task) {
+					expect(task.complexityScore).toBe(analysis.complexityScore);
+				}
+			});
+		});
 	});
 
 	describe('expandTaskDirect', () => {
@@ -383,8 +437,7 @@ describe('MCP Server Direct Functions', () => {
 					error: {
 						code: 'INPUT_VALIDATION_ERROR',
 						message: 'Task ID is required'
-					},
-					fromCache: false
+					}
 				};
 			}
 
@@ -396,8 +449,7 @@ describe('MCP Server Direct Functions', () => {
 					error: {
 						code: 'TASK_NOT_FOUND',
 						message: `Task with ID ${args.id} not found`
-					},
-					fromCache: false
+					}
 				};
 			}
 
@@ -411,8 +463,7 @@ describe('MCP Server Direct Functions', () => {
 					error: {
 						code: 'TASK_COMPLETED',
 						message: `Task ${args.id} is already marked as done and cannot be expanded`
-					},
-					fromCache: false
+					}
 				};
 			}
 
@@ -437,8 +488,7 @@ describe('MCP Server Direct Functions', () => {
 					task: expandedTask,
 					subtasksAdded: expandedTask.subtasks.length,
 					hasExistingSubtasks: false
-				},
-				fromCache: false
+				}
 			};
 		}
 
@@ -575,19 +625,38 @@ describe('MCP Server Direct Functions', () => {
 			// For successful cases, record that functions were called but don't make real calls
 			mockEnableSilentMode();
 
-			// Mock expandAllTasks
+			// Mock expandAllTasks - now returns a structured object instead of undefined
 			const mockExpandAll = jest.fn().mockImplementation(async () => {
-				// Just simulate success without any real operations
-				return undefined; // expandAllTasks doesn't return anything
+				// Return the new structured response that matches the actual implementation
+				return {
+					success: true,
+					expandedCount: 2,
+					failedCount: 0,
+					skippedCount: 1,
+					tasksToExpand: 3,
+					telemetryData: {
+						timestamp: new Date().toISOString(),
+						commandName: 'expand-all-tasks',
+						totalCost: 0.05,
+						totalTokens: 1000,
+						inputTokens: 600,
+						outputTokens: 400
+					}
+				};
 			});
 
-			// Call mock expandAllTasks
-			await mockExpandAll(
-				args.num,
-				args.research || false,
-				args.prompt || '',
-				args.force || false,
-				{ mcpLog: mockLogger, session: options.session }
+			// Call mock expandAllTasks with the correct signature
+			const result = await mockExpandAll(
+				args.file, // tasksPath
+				args.num, // numSubtasks
+				args.research || false, // useResearch
+				args.prompt || '', // additionalContext
+				args.force || false, // force
+				{
+					mcpLog: mockLogger,
+					session: options.session,
+					projectRoot: args.projectRoot
+				}
 			);
 
 			mockDisableSilentMode();
@@ -595,13 +664,14 @@ describe('MCP Server Direct Functions', () => {
 			return {
 				success: true,
 				data: {
-					message: 'Successfully expanded all pending tasks with subtasks',
+					message: `Expand all operation completed. Expanded: ${result.expandedCount}, Failed: ${result.failedCount}, Skipped: ${result.skippedCount}`,
 					details: {
-						numSubtasks: args.num,
-						research: args.research || false,
-						prompt: args.prompt || '',
-						force: args.force || false
-					}
+						expandedCount: result.expandedCount,
+						failedCount: result.failedCount,
+						skippedCount: result.skippedCount,
+						tasksToExpand: result.tasksToExpand
+					},
+					telemetryData: result.telemetryData
 				}
 			};
 		}
@@ -621,10 +691,13 @@ describe('MCP Server Direct Functions', () => {
 
 			// Assert
 			expect(result.success).toBe(true);
-			expect(result.data.message).toBe(
-				'Successfully expanded all pending tasks with subtasks'
-			);
-			expect(result.data.details.numSubtasks).toBe(3);
+			expect(result.data.message).toMatch(/Expand all operation completed/);
+			expect(result.data.details.expandedCount).toBe(2);
+			expect(result.data.details.failedCount).toBe(0);
+			expect(result.data.details.skippedCount).toBe(1);
+			expect(result.data.details.tasksToExpand).toBe(3);
+			expect(result.data.telemetryData).toBeDefined();
+			expect(result.data.telemetryData.commandName).toBe('expand-all-tasks');
 			expect(mockEnableSilentMode).toHaveBeenCalled();
 			expect(mockDisableSilentMode).toHaveBeenCalled();
 		});
@@ -645,7 +718,8 @@ describe('MCP Server Direct Functions', () => {
 
 			// Assert
 			expect(result.success).toBe(true);
-			expect(result.data.details.research).toBe(true);
+			expect(result.data.details.expandedCount).toBe(2);
+			expect(result.data.telemetryData).toBeDefined();
 			expect(mockEnableSilentMode).toHaveBeenCalled();
 			expect(mockDisableSilentMode).toHaveBeenCalled();
 		});
@@ -665,7 +739,8 @@ describe('MCP Server Direct Functions', () => {
 
 			// Assert
 			expect(result.success).toBe(true);
-			expect(result.data.details.force).toBe(true);
+			expect(result.data.details.expandedCount).toBe(2);
+			expect(result.data.telemetryData).toBeDefined();
 			expect(mockEnableSilentMode).toHaveBeenCalled();
 			expect(mockDisableSilentMode).toHaveBeenCalled();
 		});
@@ -685,11 +760,77 @@ describe('MCP Server Direct Functions', () => {
 
 			// Assert
 			expect(result.success).toBe(true);
-			expect(result.data.details.prompt).toBe(
-				'Additional context for subtasks'
-			);
+			expect(result.data.details.expandedCount).toBe(2);
+			expect(result.data.telemetryData).toBeDefined();
 			expect(mockEnableSilentMode).toHaveBeenCalled();
 			expect(mockDisableSilentMode).toHaveBeenCalled();
+		});
+
+		test('should handle case with no eligible tasks', async () => {
+			// Arrange
+			const args = {
+				projectRoot: testProjectRoot,
+				file: testTasksPath,
+				num: 3
+			};
+
+			// Act - Mock the scenario where no tasks are eligible for expansion
+			async function testNoEligibleTasks(args, mockLogger, options = {}) {
+				mockEnableSilentMode();
+
+				const mockExpandAll = jest.fn().mockImplementation(async () => {
+					return {
+						success: true,
+						expandedCount: 0,
+						failedCount: 0,
+						skippedCount: 0,
+						tasksToExpand: 0,
+						telemetryData: null,
+						message: 'No tasks eligible for expansion.'
+					};
+				});
+
+				const result = await mockExpandAll(
+					args.file,
+					args.num,
+					false,
+					'',
+					false,
+					{
+						mcpLog: mockLogger,
+						session: options.session,
+						projectRoot: args.projectRoot
+					},
+					'json'
+				);
+
+				mockDisableSilentMode();
+
+				return {
+					success: true,
+					data: {
+						message: result.message,
+						details: {
+							expandedCount: result.expandedCount,
+							failedCount: result.failedCount,
+							skippedCount: result.skippedCount,
+							tasksToExpand: result.tasksToExpand
+						},
+						telemetryData: result.telemetryData
+					}
+				};
+			}
+
+			const result = await testNoEligibleTasks(args, mockLogger, {
+				session: mockSession
+			});
+
+			// Assert
+			expect(result.success).toBe(true);
+			expect(result.data.message).toBe('No tasks eligible for expansion.');
+			expect(result.data.details.expandedCount).toBe(0);
+			expect(result.data.details.tasksToExpand).toBe(0);
+			expect(result.data.telemetryData).toBeNull();
 		});
 	});
 });

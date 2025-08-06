@@ -1,19 +1,23 @@
 /**
  * tools/next-task.js
- * Tool to find the next task to work on
+ * Tool to find the next task to work on based on dependencies and status
  */
 
 import { z } from 'zod';
 import {
-	handleApiResult,
 	createErrorResponse,
-	getProjectRootFromSession
+	handleApiResult,
+	withNormalizedProjectRoot
 } from './utils.js';
 import { nextTaskDirect } from '../core/task-master-core.js';
-import { findTasksJsonPath } from '../core/utils/path-utils.js';
+import {
+	resolveTasksPath,
+	resolveComplexityReportPath
+} from '../core/utils/path-utils.js';
+import { resolveTag } from '../../../scripts/modules/utils.js';
 
 /**
- * Register the next-task tool with the MCP server
+ * Register the nextTask tool with the MCP server
  * @param {Object} server - FastMCP server instance
  */
 export function registerNextTaskTool(server) {
@@ -23,32 +27,29 @@ export function registerNextTaskTool(server) {
 			'Find the next task to work on based on dependencies and status',
 		parameters: z.object({
 			file: z.string().optional().describe('Absolute path to the tasks file'),
+			complexityReport: z
+				.string()
+				.optional()
+				.describe(
+					'Path to the complexity report file (relative to project root or absolute)'
+				),
 			projectRoot: z
 				.string()
-				.describe('The directory of the project. Must be an absolute path.')
+				.describe('The directory of the project. Must be an absolute path.'),
+			tag: z.string().optional().describe('Tag context to operate on')
 		}),
-		execute: async (args, { log, session }) => {
+		execute: withNormalizedProjectRoot(async (args, { log, session }) => {
 			try {
 				log.info(`Finding next task with args: ${JSON.stringify(args)}`);
+				const resolvedTag = resolveTag({
+					projectRoot: args.projectRoot,
+					tag: args.tag
+				});
 
-				// Get project root from args or session
-				const rootFolder =
-					args.projectRoot || getProjectRootFromSession(session, log);
-
-				// Ensure project root was determined
-				if (!rootFolder) {
-					return createErrorResponse(
-						'Could not determine project root. Please provide it explicitly or ensure your session contains valid root information.'
-					);
-				}
-
-				// Resolve the path to tasks.json
+				// Resolve the path to tasks.json using new path utilities
 				let tasksJsonPath;
 				try {
-					tasksJsonPath = findTasksJsonPath(
-						{ projectRoot: rootFolder, file: args.file },
-						log
-					);
+					tasksJsonPath = resolveTasksPath(args, session);
 				} catch (error) {
 					log.error(`Error finding tasks.json: ${error.message}`);
 					return createErrorResponse(
@@ -56,30 +57,42 @@ export function registerNextTaskTool(server) {
 					);
 				}
 
-				const result = await nextTaskDirect(
-					{
-						// Pass the explicitly resolved path
-						tasksJsonPath: tasksJsonPath
-						// No other args specific to this tool
-					},
-					log
-				);
-
-				if (result.success) {
-					log.info(
-						`Successfully found next task: ${result.data?.task?.id || 'No available tasks'}`
+				// Resolve the path to complexity report (optional)
+				let complexityReportPath;
+				try {
+					complexityReportPath = resolveComplexityReportPath(
+						{ ...args, tag: resolvedTag },
+						session
 					);
-				} else {
-					log.error(
-						`Failed to find next task: ${result.error?.message || 'Unknown error'}`
-					);
+				} catch (error) {
+					log.error(`Error finding complexity report: ${error.message}`);
+					// This is optional, so we don't fail the operation
+					complexityReportPath = null;
 				}
 
-				return handleApiResult(result, log, 'Error finding next task');
+				const result = await nextTaskDirect(
+					{
+						tasksJsonPath: tasksJsonPath,
+						reportPath: complexityReportPath,
+						projectRoot: args.projectRoot,
+						tag: resolvedTag
+					},
+					log,
+					{ session }
+				);
+
+				log.info(`Next task result: ${result.success ? 'found' : 'none'}`);
+				return handleApiResult(
+					result,
+					log,
+					'Error finding next task',
+					undefined,
+					args.projectRoot
+				);
 			} catch (error) {
-				log.error(`Error in nextTask tool: ${error.message}`);
+				log.error(`Error finding next task: ${error.message}`);
 				return createErrorResponse(error.message);
 			}
-		}
+		})
 	});
 }

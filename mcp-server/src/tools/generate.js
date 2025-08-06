@@ -7,10 +7,11 @@ import { z } from 'zod';
 import {
 	handleApiResult,
 	createErrorResponse,
-	getProjectRootFromSession
+	withNormalizedProjectRoot
 } from './utils.js';
 import { generateTaskFilesDirect } from '../core/task-master-core.js';
-import { findTasksJsonPath } from '../core/utils/path-utils.js';
+import { findTasksPath } from '../core/utils/path-utils.js';
+import { resolveTag } from '../../../scripts/modules/utils.js';
 import path from 'path';
 
 /**
@@ -30,28 +31,22 @@ export function registerGenerateTool(server) {
 				.describe('Output directory (default: same directory as tasks file)'),
 			projectRoot: z
 				.string()
-				.describe('The directory of the project. Must be an absolute path.')
+				.describe('The directory of the project. Must be an absolute path.'),
+			tag: z.string().optional().describe('Tag context to operate on')
 		}),
-		execute: async (args, { log, session }) => {
+		execute: withNormalizedProjectRoot(async (args, { log, session }) => {
 			try {
 				log.info(`Generating task files with args: ${JSON.stringify(args)}`);
 
-				// Get project root from args or session
-				const rootFolder =
-					args.projectRoot || getProjectRootFromSession(session, log);
-
-				// Ensure project root was determined
-				if (!rootFolder) {
-					return createErrorResponse(
-						'Could not determine project root. Please provide it explicitly or ensure your session contains valid root information.'
-					);
-				}
-
-				// Resolve the path to tasks.json
+				const resolvedTag = resolveTag({
+					projectRoot: args.projectRoot,
+					tag: args.tag
+				});
+				// Use args.projectRoot directly (guaranteed by withNormalizedProjectRoot)
 				let tasksJsonPath;
 				try {
-					tasksJsonPath = findTasksJsonPath(
-						{ projectRoot: rootFolder, file: args.file },
+					tasksJsonPath = findTasksPath(
+						{ projectRoot: args.projectRoot, file: args.file },
 						log
 					);
 				} catch (error) {
@@ -61,19 +56,19 @@ export function registerGenerateTool(server) {
 					);
 				}
 
-				// Determine output directory: use explicit arg or default to tasks.json directory
 				const outputDir = args.output
-					? path.resolve(rootFolder, args.output) // Resolve relative to root if needed
+					? path.resolve(args.projectRoot, args.output)
 					: path.dirname(tasksJsonPath);
 
 				const result = await generateTaskFilesDirect(
 					{
-						// Pass the explicitly resolved paths
 						tasksJsonPath: tasksJsonPath,
-						outputDir: outputDir
-						// No other args specific to this tool
+						outputDir: outputDir,
+						projectRoot: args.projectRoot,
+						tag: resolvedTag
 					},
-					log
+					log,
+					{ session }
 				);
 
 				if (result.success) {
@@ -84,11 +79,17 @@ export function registerGenerateTool(server) {
 					);
 				}
 
-				return handleApiResult(result, log, 'Error generating task files');
+				return handleApiResult(
+					result,
+					log,
+					'Error generating task files',
+					undefined,
+					args.projectRoot
+				);
 			} catch (error) {
 				log.error(`Error in generate tool: ${error.message}`);
 				return createErrorResponse(error.message);
 			}
-		}
+		})
 	});
 }

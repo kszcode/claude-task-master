@@ -7,10 +7,18 @@ import { z } from 'zod';
 import {
 	handleApiResult,
 	createErrorResponse,
-	getProjectRootFromSession
+	withNormalizedProjectRoot
 } from './utils.js';
-import { setTaskStatusDirect } from '../core/task-master-core.js';
-import { findTasksJsonPath } from '../core/utils/path-utils.js';
+import {
+	setTaskStatusDirect,
+	nextTaskDirect
+} from '../core/task-master-core.js';
+import {
+	findTasksPath,
+	findComplexityReportPath
+} from '../core/utils/path-utils.js';
+import { TASK_STATUS_OPTIONS } from '../../../src/constants/task-status.js';
+import { resolveTag } from '../../../scripts/modules/utils.js';
 
 /**
  * Register the setTaskStatus tool with the MCP server
@@ -24,38 +32,41 @@ export function registerSetTaskStatusTool(server) {
 			id: z
 				.string()
 				.describe(
-					"Task ID or subtask ID (e.g., '15', '15.2'). Can be comma-separated for multiple updates."
+					"Task ID or subtask ID (e.g., '15', '15.2'). Can be comma-separated to update multiple tasks/subtasks at once."
 				),
 			status: z
-				.string()
+				.enum(TASK_STATUS_OPTIONS)
 				.describe(
 					"New status to set (e.g., 'pending', 'done', 'in-progress', 'review', 'deferred', 'cancelled'."
 				),
 			file: z.string().optional().describe('Absolute path to the tasks file'),
+			complexityReport: z
+				.string()
+				.optional()
+				.describe(
+					'Path to the complexity report file (relative to project root or absolute)'
+				),
 			projectRoot: z
 				.string()
-				.describe('The directory of the project. Must be an absolute path.')
+				.describe('The directory of the project. Must be an absolute path.'),
+			tag: z.string().optional().describe('Optional tag context to operate on')
 		}),
-		execute: async (args, { log, session }) => {
+		execute: withNormalizedProjectRoot(async (args, { log, session }) => {
 			try {
-				log.info(`Setting status of task(s) ${args.id} to: ${args.status}`);
-
-				// Get project root from args or session
-				const rootFolder =
-					args.projectRoot || getProjectRootFromSession(session, log);
-
-				// Ensure project root was determined
-				if (!rootFolder) {
-					return createErrorResponse(
-						'Could not determine project root. Please provide it explicitly or ensure your session contains valid root information.'
-					);
-				}
-
-				// Resolve the path to tasks.json
+				log.info(
+					`Setting status of task(s) ${args.id} to: ${args.status} ${
+						args.tag ? `in tag: ${args.tag}` : 'in current tag'
+					}`
+				);
+				const resolvedTag = resolveTag({
+					projectRoot: args.projectRoot,
+					tag: args.tag
+				});
+				// Use args.projectRoot directly (guaranteed by withNormalizedProjectRoot)
 				let tasksJsonPath;
 				try {
-					tasksJsonPath = findTasksJsonPath(
-						{ projectRoot: rootFolder, file: args.file },
+					tasksJsonPath = findTasksPath(
+						{ projectRoot: args.projectRoot, file: args.file },
 						log
 					);
 				} catch (error) {
@@ -65,19 +76,33 @@ export function registerSetTaskStatusTool(server) {
 					);
 				}
 
-				// Call the direct function with the resolved path
+				let complexityReportPath;
+				try {
+					complexityReportPath = findComplexityReportPath(
+						{
+							projectRoot: args.projectRoot,
+							complexityReport: args.complexityReport,
+							tag: resolvedTag
+						},
+						log
+					);
+				} catch (error) {
+					log.error(`Error finding complexity report: ${error.message}`);
+				}
+
 				const result = await setTaskStatusDirect(
 					{
-						// Pass the explicitly resolved path
 						tasksJsonPath: tasksJsonPath,
-						// Pass other relevant args
 						id: args.id,
-						status: args.status
+						status: args.status,
+						complexityReportPath,
+						projectRoot: args.projectRoot,
+						tag: resolvedTag
 					},
-					log
+					log,
+					{ session }
 				);
 
-				// Log the result
 				if (result.success) {
 					log.info(
 						`Successfully updated status for task(s) ${args.id} to "${args.status}": ${result.data.message}`
@@ -88,14 +113,19 @@ export function registerSetTaskStatusTool(server) {
 					);
 				}
 
-				// Format and return the result
-				return handleApiResult(result, log, 'Error setting task status');
+				return handleApiResult(
+					result,
+					log,
+					'Error setting task status',
+					undefined,
+					args.projectRoot
+				);
 			} catch (error) {
 				log.error(`Error in setTaskStatus tool: ${error.message}`);
 				return createErrorResponse(
 					`Error setting task status: ${error.message}`
 				);
 			}
-		}
+		})
 	});
 }

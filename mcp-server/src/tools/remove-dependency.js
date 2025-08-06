@@ -7,10 +7,11 @@ import { z } from 'zod';
 import {
 	handleApiResult,
 	createErrorResponse,
-	getProjectRootFromSession
+	withNormalizedProjectRoot
 } from './utils.js';
 import { removeDependencyDirect } from '../core/task-master-core.js';
-import { findTasksJsonPath } from '../core/utils/path-utils.js';
+import { findTasksPath } from '../core/utils/path-utils.js';
+import { resolveTag } from '../../../scripts/modules/utils.js';
 
 /**
  * Register the removeDependency tool with the MCP server
@@ -31,30 +32,24 @@ export function registerRemoveDependencyTool(server) {
 				),
 			projectRoot: z
 				.string()
-				.describe('The directory of the project. Must be an absolute path.')
+				.describe('The directory of the project. Must be an absolute path.'),
+			tag: z.string().optional().describe('Tag context to operate on')
 		}),
-		execute: async (args, { log, session }) => {
+		execute: withNormalizedProjectRoot(async (args, { log, session }) => {
 			try {
+				const resolvedTag = resolveTag({
+					projectRoot: args.projectRoot,
+					tag: args.tag
+				});
 				log.info(
 					`Removing dependency for task ${args.id} from ${args.dependsOn} with args: ${JSON.stringify(args)}`
 				);
 
-				// Get project root from args or session
-				const rootFolder =
-					args.projectRoot || getProjectRootFromSession(session, log);
-
-				// Ensure project root was determined
-				if (!rootFolder) {
-					return createErrorResponse(
-						'Could not determine project root. Please provide it explicitly or ensure your session contains valid root information.'
-					);
-				}
-
-				// Resolve the path to tasks.json
+				// Use args.projectRoot directly (guaranteed by withNormalizedProjectRoot)
 				let tasksJsonPath;
 				try {
-					tasksJsonPath = findTasksJsonPath(
-						{ projectRoot: rootFolder, file: args.file },
+					tasksJsonPath = findTasksPath(
+						{ projectRoot: args.projectRoot, file: args.file },
 						log
 					);
 				} catch (error) {
@@ -66,11 +61,11 @@ export function registerRemoveDependencyTool(server) {
 
 				const result = await removeDependencyDirect(
 					{
-						// Pass the explicitly resolved path
 						tasksJsonPath: tasksJsonPath,
-						// Pass other relevant args
 						id: args.id,
-						dependsOn: args.dependsOn
+						dependsOn: args.dependsOn,
+						projectRoot: args.projectRoot,
+						tag: resolvedTag
 					},
 					log
 				);
@@ -81,11 +76,17 @@ export function registerRemoveDependencyTool(server) {
 					log.error(`Failed to remove dependency: ${result.error.message}`);
 				}
 
-				return handleApiResult(result, log, 'Error removing dependency');
+				return handleApiResult(
+					result,
+					log,
+					'Error removing dependency',
+					undefined,
+					args.projectRoot
+				);
 			} catch (error) {
 				log.error(`Error in removeDependency tool: ${error.message}`);
 				return createErrorResponse(error.message);
 			}
-		}
+		})
 	});
 }

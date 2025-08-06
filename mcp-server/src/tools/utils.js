@@ -7,12 +7,116 @@ import { spawnSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { contextManager } from '../core/context-manager.js'; // Import the singleton
+import { fileURLToPath } from 'url';
+import { getCurrentTag } from '../../../scripts/modules/utils.js';
 
 // Import path utilities to ensure consistent path resolution
 import {
 	lastFoundProjectRoot,
 	PROJECT_MARKERS
 } from '../core/utils/path-utils.js';
+
+const __filename = fileURLToPath(import.meta.url);
+
+// Cache for version info to avoid repeated file reads
+let cachedVersionInfo = null;
+
+/**
+ * Get version information from package.json
+ * @returns {Object} Version information
+ */
+function getVersionInfo() {
+	// Return cached version if available
+	if (cachedVersionInfo) {
+		return cachedVersionInfo;
+	}
+
+	try {
+		// Navigate to the project root from the tools directory
+		const packageJsonPath = path.join(
+			path.dirname(__filename),
+			'../../../package.json'
+		);
+		if (fs.existsSync(packageJsonPath)) {
+			const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+			cachedVersionInfo = {
+				version: packageJson.version,
+				name: packageJson.name
+			};
+			return cachedVersionInfo;
+		}
+		cachedVersionInfo = {
+			version: 'unknown',
+			name: 'task-master-ai'
+		};
+		return cachedVersionInfo;
+	} catch (error) {
+		// Fallback version info if package.json can't be read
+		cachedVersionInfo = {
+			version: 'unknown',
+			name: 'task-master-ai'
+		};
+		return cachedVersionInfo;
+	}
+}
+
+/**
+ * Get current tag information for MCP responses
+ * @param {string} projectRoot - The project root directory
+ * @param {Object} log - Logger object
+ * @returns {Object} Tag information object
+ */
+function getTagInfo(projectRoot, log) {
+	try {
+		if (!projectRoot) {
+			log.warn('No project root provided for tag information');
+			return { currentTag: 'master', availableTags: ['master'] };
+		}
+
+		const currentTag = getCurrentTag(projectRoot);
+
+		// Read available tags from tasks.json
+		let availableTags = ['master']; // Default fallback
+		try {
+			const tasksJsonPath = path.join(
+				projectRoot,
+				'.taskmaster',
+				'tasks',
+				'tasks.json'
+			);
+			if (fs.existsSync(tasksJsonPath)) {
+				const tasksData = JSON.parse(fs.readFileSync(tasksJsonPath, 'utf-8'));
+
+				// If it's the new tagged format, extract tag keys
+				if (
+					tasksData &&
+					typeof tasksData === 'object' &&
+					!Array.isArray(tasksData.tasks)
+				) {
+					const tagKeys = Object.keys(tasksData).filter(
+						(key) =>
+							tasksData[key] &&
+							typeof tasksData[key] === 'object' &&
+							Array.isArray(tasksData[key].tasks)
+					);
+					if (tagKeys.length > 0) {
+						availableTags = tagKeys;
+					}
+				}
+			}
+		} catch (tagError) {
+			log.debug(`Could not read available tags: ${tagError.message}`);
+		}
+
+		return {
+			currentTag: currentTag || 'master',
+			availableTags: availableTags
+		};
+	} catch (error) {
+		log.warn(`Error getting tag information: ${error.message}`);
+		return { currentTag: 'master', availableTags: ['master'] };
+	}
+}
 
 /**
  * Get normalized project root path
@@ -22,7 +126,7 @@ import {
  */
 function getProjectRoot(projectRootRaw, log) {
 	// PRECEDENCE ORDER:
-	// 1. Environment variable override
+	// 1. Environment variable override (TASK_MASTER_PROJECT_ROOT)
 	// 2. Explicitly provided projectRoot in args
 	// 3. Previously found/cached project root
 	// 4. Current directory if it has project markers
@@ -83,10 +187,10 @@ function getProjectRoot(projectRootRaw, log) {
 }
 
 /**
- * Extracts the project root path from the FastMCP session object.
- * @param {Object} session - The FastMCP session object.
- * @param {Object} log - Logger object.
- * @returns {string|null} - The absolute path to the project root, or null if not found.
+ * Extracts and normalizes the project root path from the MCP session object.
+ * @param {Object} session - The MCP session object.
+ * @param {Object} log - The MCP logger object.
+ * @returns {string|null} - The normalized absolute project root path or null if not found/invalid.
  */
 function getProjectRootFromSession(session, log) {
 	try {
@@ -107,68 +211,87 @@ function getProjectRootFromSession(session, log) {
 			})}`
 		);
 
-		// ALWAYS ensure we return a valid path for project root
+		let rawRootPath = null;
+		let decodedPath = null;
+		let finalPath = null;
+
+		// Check primary location
+		if (session?.roots?.[0]?.uri) {
+			rawRootPath = session.roots[0].uri;
+			log.info(`Found raw root URI in session.roots[0].uri: ${rawRootPath}`);
+		}
+		// Check alternate location
+		else if (session?.roots?.roots?.[0]?.uri) {
+			rawRootPath = session.roots.roots[0].uri;
+			log.info(
+				`Found raw root URI in session.roots.roots[0].uri: ${rawRootPath}`
+			);
+		}
+
+		if (rawRootPath) {
+			// Decode URI and strip file:// protocol
+			decodedPath = rawRootPath.startsWith('file://')
+				? decodeURIComponent(rawRootPath.slice(7))
+				: rawRootPath; // Assume non-file URI is already decoded? Or decode anyway? Let's decode.
+			if (!rawRootPath.startsWith('file://')) {
+				decodedPath = decodeURIComponent(rawRootPath); // Decode even if no file://
+			}
+
+			// Handle potential Windows drive prefix after stripping protocol (e.g., /C:/...)
+			if (
+				decodedPath.startsWith('/') &&
+				/[A-Za-z]:/.test(decodedPath.substring(1, 3))
+			) {
+				decodedPath = decodedPath.substring(1); // Remove leading slash if it's like /C:/...
+			}
+
+			log.info(`Decoded path: ${decodedPath}`);
+
+			// Normalize slashes and resolve
+			const normalizedSlashes = decodedPath.replace(/\\/g, '/');
+			finalPath = path.resolve(normalizedSlashes); // Resolve to absolute path for current OS
+
+			log.info(`Normalized and resolved session path: ${finalPath}`);
+			return finalPath;
+		}
+
+		// Fallback Logic (remains the same)
+		log.warn('No project root URI found in session. Attempting fallbacks...');
 		const cwd = process.cwd();
 
-		// If we have a session with roots array
-		if (session?.roots?.[0]?.uri) {
-			const rootUri = session.roots[0].uri;
-			log.info(`Found rootUri in session.roots[0].uri: ${rootUri}`);
-			const rootPath = rootUri.startsWith('file://')
-				? decodeURIComponent(rootUri.slice(7))
-				: rootUri;
-			log.info(`Decoded rootPath: ${rootPath}`);
-			return rootPath;
-		}
-
-		// If we have a session with roots.roots array (different structure)
-		if (session?.roots?.roots?.[0]?.uri) {
-			const rootUri = session.roots.roots[0].uri;
-			log.info(`Found rootUri in session.roots.roots[0].uri: ${rootUri}`);
-			const rootPath = rootUri.startsWith('file://')
-				? decodeURIComponent(rootUri.slice(7))
-				: rootUri;
-			log.info(`Decoded rootPath: ${rootPath}`);
-			return rootPath;
-		}
-
-		// Get the server's location and try to find project root -- this is a fallback necessary in Cursor IDE
-		const serverPath = process.argv[1]; // This should be the path to server.js, which is in mcp-server/
+		// Fallback 1: Use server path deduction (Cursor IDE)
+		const serverPath = process.argv[1];
 		if (serverPath && serverPath.includes('mcp-server')) {
-			// Find the mcp-server directory first
 			const mcpServerIndex = serverPath.indexOf('mcp-server');
 			if (mcpServerIndex !== -1) {
-				// Get the path up to mcp-server, which should be the project root
-				const projectRoot = serverPath.substring(0, mcpServerIndex - 1); // -1 to remove trailing slash
+				const projectRoot = path.dirname(
+					serverPath.substring(0, mcpServerIndex)
+				); // Go up one level
 
-				// Verify this looks like our project root by checking for key files/directories
 				if (
 					fs.existsSync(path.join(projectRoot, '.cursor')) ||
 					fs.existsSync(path.join(projectRoot, 'mcp-server')) ||
 					fs.existsSync(path.join(projectRoot, 'package.json'))
 				) {
-					log.info(`Found project root from server path: ${projectRoot}`);
-					return projectRoot;
+					log.info(
+						`Using project root derived from server path: ${projectRoot}`
+					);
+					return projectRoot; // Already absolute
 				}
 			}
 		}
 
-		// ALWAYS ensure we return a valid path as a last resort
+		// Fallback 2: Use CWD
 		log.info(`Using current working directory as ultimate fallback: ${cwd}`);
-		return cwd;
+		return cwd; // Already absolute
 	} catch (e) {
-		// If we have a server path, use it as a basis for project root
-		const serverPath = process.argv[1];
-		if (serverPath && serverPath.includes('mcp-server')) {
-			const mcpServerIndex = serverPath.indexOf('mcp-server');
-			return mcpServerIndex !== -1
-				? serverPath.substring(0, mcpServerIndex - 1)
-				: process.cwd();
-		}
-
-		// Only use cwd if it's not "/"
+		log.error(`Error in getProjectRootFromSession: ${e.message}`);
+		// Attempt final fallback to CWD on error
 		const cwd = process.cwd();
-		return cwd !== '/' ? cwd : '/';
+		log.warn(
+			`Returning CWD (${cwd}) due to error during session root processing.`
+		);
+		return cwd;
 	}
 }
 
@@ -178,19 +301,26 @@ function getProjectRootFromSession(session, log) {
  * @param {Object} log - Logger object
  * @param {string} errorPrefix - Prefix for error messages
  * @param {Function} processFunction - Optional function to process successful result data
+ * @param {string} [projectRoot] - Optional project root for tag information
  * @returns {Object} - Standardized MCP response object
  */
-function handleApiResult(
+async function handleApiResult(
 	result,
 	log,
 	errorPrefix = 'API error',
-	processFunction = processMCPResponseData
+	processFunction = processMCPResponseData,
+	projectRoot = null
 ) {
+	// Get version info for every response
+	const versionInfo = getVersionInfo();
+
+	// Get tag info if project root is provided
+	const tagInfo = projectRoot ? getTagInfo(projectRoot, log) : null;
+
 	if (!result.success) {
 		const errorMsg = result.error?.message || `Unknown ${errorPrefix}`;
-		// Include cache status in error logs
-		log.error(`${errorPrefix}: ${errorMsg}. From cache: ${result.fromCache}`); // Keep logging cache status on error
-		return createErrorResponse(errorMsg);
+		log.error(`${errorPrefix}: ${errorMsg}`);
+		return createErrorResponse(errorMsg, versionInfo, tagInfo);
 	}
 
 	// Process the result data if needed
@@ -198,16 +328,19 @@ function handleApiResult(
 		? processFunction(result.data)
 		: result.data;
 
-	// Log success including cache status
-	log.info(`Successfully completed operation. From cache: ${result.fromCache}`); // Add success log with cache status
+	log.info('Successfully completed operation');
 
-	// Create the response payload including the fromCache flag
+	// Create the response payload including version info and tag info
 	const responsePayload = {
-		fromCache: result.fromCache, // Get the flag from the original 'result'
-		data: processedData // Nest the processed data under a 'data' key
+		data: processedData,
+		version: versionInfo
 	};
 
-	// Pass this combined payload to createContentResponse
+	// Add tag information if available
+	if (tagInfo) {
+		responsePayload.tag = tagInfo;
+	}
+
 	return createContentResponse(responsePayload);
 }
 
@@ -301,8 +434,8 @@ function executeTaskMasterCommand(
  * @param {Function} options.actionFn - The async function to execute if the cache misses.
  *                                      Should return an object like { success: boolean, data?: any, error?: { code: string, message: string } }.
  * @param {Object} options.log - The logger instance.
- * @returns {Promise<Object>} - An object containing the result, indicating if it was from cache.
- *                              Format: { success: boolean, data?: any, error?: { code: string, message: string }, fromCache: boolean }
+ * @returns {Promise<Object>} - An object containing the result.
+ *                              Format: { success: boolean, data?: any, error?: { code: string, message: string } }
  */
 async function getCachedOrExecute({ cacheKey, actionFn, log }) {
 	// Check cache first
@@ -310,11 +443,7 @@ async function getCachedOrExecute({ cacheKey, actionFn, log }) {
 
 	if (cachedResult !== undefined) {
 		log.info(`Cache hit for key: ${cacheKey}`);
-		// Return the cached data in the same structure as a fresh result
-		return {
-			...cachedResult, // Spread the cached result to maintain its structure
-			fromCache: true // Just add the fromCache flag
-		};
+		return cachedResult;
 	}
 
 	log.info(`Cache miss for key: ${cacheKey}. Executing action function.`);
@@ -322,12 +451,10 @@ async function getCachedOrExecute({ cacheKey, actionFn, log }) {
 	// Execute the action function if cache missed
 	const result = await actionFn();
 
-	// If the action was successful, cache the result (but without fromCache flag)
+	// If the action was successful, cache the result
 	if (result.success && result.data !== undefined) {
 		log.info(`Action successful. Caching result for key: ${cacheKey}`);
-		// Cache the entire result structure (minus the fromCache flag)
-		const { fromCache, ...resultToCache } = result;
-		contextManager.setCachedData(cacheKey, resultToCache);
+		contextManager.setCachedData(cacheKey, result);
 	} else if (!result.success) {
 		log.warn(
 			`Action failed for cache key ${cacheKey}. Result not cached. Error: ${result.error?.message}`
@@ -338,11 +465,7 @@ async function getCachedOrExecute({ cacheKey, actionFn, log }) {
 		);
 	}
 
-	// Return the fresh result, indicating it wasn't from cache
-	return {
-		...result,
-		fromCache: false
-	};
+	return result;
 }
 
 /**
@@ -441,17 +564,217 @@ function createContentResponse(content) {
 /**
  * Creates error response for tools
  * @param {string} errorMessage - Error message to include in response
+ * @param {Object} [versionInfo] - Optional version information object
+ * @param {Object} [tagInfo] - Optional tag information object
  * @returns {Object} - Error content response object in FastMCP format
  */
-export function createErrorResponse(errorMessage) {
+function createErrorResponse(errorMessage, versionInfo, tagInfo) {
+	// Provide fallback version info if not provided
+	if (!versionInfo) {
+		versionInfo = getVersionInfo();
+	}
+
+	let responseText = `Error: ${errorMessage}
+Version: ${versionInfo.version}
+Name: ${versionInfo.name}`;
+
+	// Add tag information if available
+	if (tagInfo) {
+		responseText += `
+Current Tag: ${tagInfo.currentTag}`;
+	}
+
 	return {
 		content: [
 			{
 				type: 'text',
-				text: `Error: ${errorMessage}`
+				text: responseText
 			}
 		],
 		isError: true
+	};
+}
+
+/**
+ * Creates a logger wrapper object compatible with core function expectations.
+ * Adapts the MCP logger to the { info, warn, error, debug, success } structure.
+ * @param {Object} log - The MCP logger instance.
+ * @returns {Object} - The logger wrapper object.
+ */
+function createLogWrapper(log) {
+	return {
+		info: (message, ...args) => log.info(message, ...args),
+		warn: (message, ...args) => log.warn(message, ...args),
+		error: (message, ...args) => log.error(message, ...args),
+		// Handle optional debug method
+		debug: (message, ...args) =>
+			log.debug ? log.debug(message, ...args) : null,
+		// Map success to info as a common fallback
+		success: (message, ...args) => log.info(message, ...args)
+	};
+}
+
+/**
+ * Resolves and normalizes a project root path from various formats.
+ * Handles URI encoding, Windows paths, and file protocols.
+ * @param {string | undefined | null} rawPath - The raw project root path.
+ * @param {object} [log] - Optional logger object.
+ * @returns {string | null} Normalized absolute path or null if input is invalid/empty.
+ */
+function normalizeProjectRoot(rawPath, log) {
+	if (!rawPath) return null;
+	try {
+		let pathString = Array.isArray(rawPath) ? rawPath[0] : String(rawPath);
+		if (!pathString) return null;
+
+		// 1. Decode URI Encoding
+		// Use try-catch for decoding as malformed URIs can throw
+		try {
+			pathString = decodeURIComponent(pathString);
+		} catch (decodeError) {
+			if (log)
+				log.warn(
+					`Could not decode URI component for path "${rawPath}": ${decodeError.message}. Proceeding with raw string.`
+				);
+			// Proceed with the original string if decoding fails
+			pathString = Array.isArray(rawPath) ? rawPath[0] : String(rawPath);
+		}
+
+		// 2. Strip file:// prefix (handle 2 or 3 slashes)
+		if (pathString.startsWith('file:///')) {
+			pathString = pathString.slice(7); // Slice 7 for file:///, may leave leading / on Windows
+		} else if (pathString.startsWith('file://')) {
+			pathString = pathString.slice(7); // Slice 7 for file://
+		}
+
+		// 3. Handle potential Windows leading slash after stripping prefix (e.g., /C:/...)
+		// This checks if it starts with / followed by a drive letter C: D: etc.
+		if (
+			pathString.startsWith('/') &&
+			/[A-Za-z]:/.test(pathString.substring(1, 3))
+		) {
+			pathString = pathString.substring(1); // Remove the leading slash
+		}
+
+		// 4. Normalize backslashes to forward slashes
+		pathString = pathString.replace(/\\/g, '/');
+
+		// 5. Resolve to absolute path using server's OS convention
+		const resolvedPath = path.resolve(pathString);
+		return resolvedPath;
+	} catch (error) {
+		if (log) {
+			log.error(
+				`Error normalizing project root path "${rawPath}": ${error.message}`
+			);
+		}
+		return null; // Return null on error
+	}
+}
+
+/**
+ * Extracts the raw project root path from the session (without normalization).
+ * Used as a fallback within the HOF.
+ * @param {Object} session - The MCP session object.
+ * @param {Object} log - The MCP logger object.
+ * @returns {string|null} The raw path string or null.
+ */
+function getRawProjectRootFromSession(session, log) {
+	try {
+		// Check primary location
+		if (session?.roots?.[0]?.uri) {
+			return session.roots[0].uri;
+		}
+		// Check alternate location
+		else if (session?.roots?.roots?.[0]?.uri) {
+			return session.roots.roots[0].uri;
+		}
+		return null; // Not found in expected session locations
+	} catch (e) {
+		log.error(`Error accessing session roots: ${e.message}`);
+		return null;
+	}
+}
+
+/**
+ * Higher-order function to wrap MCP tool execute methods.
+ * Ensures args.projectRoot is present and normalized before execution.
+ * Uses TASK_MASTER_PROJECT_ROOT environment variable with proper precedence.
+ * @param {Function} executeFn - The original async execute(args, context) function.
+ * @returns {Function} The wrapped async execute function.
+ */
+function withNormalizedProjectRoot(executeFn) {
+	return async (args, context) => {
+		const { log, session } = context;
+		let normalizedRoot = null;
+		let rootSource = 'unknown';
+
+		try {
+			// PRECEDENCE ORDER:
+			// 1. TASK_MASTER_PROJECT_ROOT environment variable (from process.env or session)
+			// 2. args.projectRoot (explicitly provided)
+			// 3. Session-based project root resolution
+			// 4. Current directory fallback
+
+			// 1. Check for TASK_MASTER_PROJECT_ROOT environment variable first
+			if (process.env.TASK_MASTER_PROJECT_ROOT) {
+				const envRoot = process.env.TASK_MASTER_PROJECT_ROOT;
+				normalizedRoot = path.isAbsolute(envRoot)
+					? envRoot
+					: path.resolve(process.cwd(), envRoot);
+				rootSource = 'TASK_MASTER_PROJECT_ROOT environment variable';
+				log.info(`Using project root from ${rootSource}: ${normalizedRoot}`);
+			}
+			// Also check session environment variables for TASK_MASTER_PROJECT_ROOT
+			else if (session?.env?.TASK_MASTER_PROJECT_ROOT) {
+				const envRoot = session.env.TASK_MASTER_PROJECT_ROOT;
+				normalizedRoot = path.isAbsolute(envRoot)
+					? envRoot
+					: path.resolve(process.cwd(), envRoot);
+				rootSource = 'TASK_MASTER_PROJECT_ROOT session environment variable';
+				log.info(`Using project root from ${rootSource}: ${normalizedRoot}`);
+			}
+			// 2. If no environment variable, try args.projectRoot
+			else if (args.projectRoot) {
+				normalizedRoot = normalizeProjectRoot(args.projectRoot, log);
+				rootSource = 'args.projectRoot';
+				log.info(`Using project root from ${rootSource}: ${normalizedRoot}`);
+			}
+			// 3. If no args.projectRoot, try session-based resolution
+			else {
+				const sessionRoot = getProjectRootFromSession(session, log);
+				if (sessionRoot) {
+					normalizedRoot = sessionRoot; // getProjectRootFromSession already normalizes
+					rootSource = 'session';
+					log.info(`Using project root from ${rootSource}: ${normalizedRoot}`);
+				}
+			}
+
+			if (!normalizedRoot) {
+				log.error(
+					'Could not determine project root from environment, args, or session.'
+				);
+				return createErrorResponse(
+					'Could not determine project root. Please provide projectRoot argument or ensure TASK_MASTER_PROJECT_ROOT environment variable is set.'
+				);
+			}
+
+			// Inject the normalized root back into args
+			const updatedArgs = { ...args, projectRoot: normalizedRoot };
+
+			// Execute the original function with normalized root in args
+			return await executeFn(updatedArgs, context);
+		} catch (error) {
+			log.error(
+				`Error within withNormalizedProjectRoot HOF (Normalized Root: ${normalizedRoot}): ${error.message}`
+			);
+			// Add stack trace if available and debug enabled
+			if (error.stack && log.debug) {
+				log.debug(error.stack);
+			}
+			// Return a generic error or re-throw depending on desired behavior
+			return createErrorResponse(`Operation failed: ${error.message}`);
+		}
 	};
 }
 
@@ -459,9 +782,15 @@ export function createErrorResponse(errorMessage) {
 export {
 	getProjectRoot,
 	getProjectRootFromSession,
+	getTagInfo,
 	handleApiResult,
 	executeTaskMasterCommand,
 	getCachedOrExecute,
 	processMCPResponseData,
-	createContentResponse
+	createContentResponse,
+	createErrorResponse,
+	createLogWrapper,
+	normalizeProjectRoot,
+	getRawProjectRootFromSession,
+	withNormalizedProjectRoot
 };

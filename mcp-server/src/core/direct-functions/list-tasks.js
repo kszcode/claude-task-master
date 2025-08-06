@@ -4,7 +4,6 @@
  */
 
 import { listTasks } from '../../../../scripts/modules/task-manager.js';
-import { getCachedOrExecute } from '../../tools/utils.js';
 import {
 	enableSilentMode,
 	disableSilentMode
@@ -14,12 +13,20 @@ import {
  * Direct function wrapper for listTasks with error handling and caching.
  *
  * @param {Object} args - Command arguments (now expecting tasksJsonPath explicitly).
+ * @param {string} args.tasksJsonPath - Path to the tasks.json file.
+ * @param {string} args.reportPath - Path to the report file.
+ * @param {string} args.status - Status of the task.
+ * @param {boolean} args.withSubtasks - Whether to include subtasks.
+ * @param {string} args.projectRoot - Project root path (for MCP/env fallback)
+ * @param {string} args.tag - Tag for the task (optional)
  * @param {Object} log - Logger object.
- * @returns {Promise<Object>} - Task list result { success: boolean, data?: any, error?: { code: string, message: string }, fromCache: boolean }.
+ * @returns {Promise<Object>} - Task list result { success: boolean, data?: any, error?: { code: string, message: string } }.
  */
-export async function listTasksDirect(args, log) {
+export async function listTasksDirect(args, log, context = {}) {
 	// Destructure the explicit tasksJsonPath from args
-	const { tasksJsonPath, status, withSubtasks } = args;
+	const { tasksJsonPath, reportPath, status, withSubtasks, projectRoot, tag } =
+		args;
+	const { session } = context;
 
 	if (!tasksJsonPath) {
 		log.error('listTasksDirect called without tasksJsonPath');
@@ -28,15 +35,13 @@ export async function listTasksDirect(args, log) {
 			error: {
 				code: 'MISSING_ARGUMENT',
 				message: 'tasksJsonPath is required'
-			},
-			fromCache: false
+			}
 		};
 	}
 
 	// Use the explicit tasksJsonPath for cache key
 	const statusFilter = status || 'all';
 	const withSubtasksFilter = withSubtasks || false;
-	const cacheKey = `listTasks:${tasksJsonPath}:${statusFilter}:${withSubtasksFilter}`;
 
 	// Define the action function to be executed on cache miss
 	const coreListTasksAction = async () => {
@@ -51,8 +56,10 @@ export async function listTasksDirect(args, log) {
 			const resultData = listTasks(
 				tasksJsonPath,
 				statusFilter,
+				reportPath,
 				withSubtasksFilter,
-				'json'
+				'json',
+				{ projectRoot, session, tag }
 			);
 
 			if (!resultData || !resultData.tasks) {
@@ -65,6 +72,7 @@ export async function listTasksDirect(args, log) {
 					}
 				};
 			}
+
 			log.info(
 				`Core listTasks function retrieved ${resultData.tasks.length} tasks`
 			);
@@ -88,25 +96,19 @@ export async function listTasksDirect(args, log) {
 		}
 	};
 
-	// Use the caching utility
 	try {
-		const result = await getCachedOrExecute({
-			cacheKey,
-			actionFn: coreListTasksAction,
-			log
-		});
-		log.info(`listTasksDirect completed. From cache: ${result.fromCache}`);
-		return result; // Returns { success, data/error, fromCache }
+		const result = await coreListTasksAction();
+		log.info('listTasksDirect completed');
+		return result;
 	} catch (error) {
-		// Catch unexpected errors from getCachedOrExecute itself (though unlikely)
-		log.error(
-			`Unexpected error during getCachedOrExecute for listTasks: ${error.message}`
-		);
+		log.error(`Unexpected error during listTasks: ${error.message}`);
 		console.error(error.stack);
 		return {
 			success: false,
-			error: { code: 'CACHE_UTIL_ERROR', message: error.message },
-			fromCache: false
+			error: {
+				code: 'UNEXPECTED_ERROR',
+				message: error.message
+			}
 		};
 	}
 }
